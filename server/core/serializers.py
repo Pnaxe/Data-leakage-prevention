@@ -162,7 +162,7 @@ class SensitiveFileSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_allowed_role_names(self, obj):
-        return [role.get_name_display() for role in obj.allowed_roles.all()]
+        return [role.display_name for role in obj.allowed_roles.all()]
 
 
 class ActivityLogSerializer(serializers.ModelSerializer):
@@ -226,7 +226,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ["uploaded_by", "status", "archived_at"]
 
     def get_allowed_role_names(self, obj):
-        return [role.get_name_display() for role in obj.allowed_roles.all()]
+        return [role.display_name for role in obj.allowed_roles.all()]
 
     def get_file_name(self, obj):
         return obj.file.name.split("/")[-1] if obj.file else ""

@@ -117,7 +117,7 @@ export default function DocumentRepository() {
     event.preventDefault();
     setUploading(true);
     try {
-      await api.post("/documents/", asFormData(form), { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post("/documents/", asFormData(form));
       setForm(emptyForm);
       setShowUploadForm(false);
       event.target.reset();
@@ -146,7 +146,7 @@ export default function DocumentRepository() {
 
   async function saveEdit(event) {
     event.preventDefault();
-    await api.patch(`/documents/${editingId}/`, asFormData(editForm, false), { headers: { "Content-Type": "multipart/form-data" } });
+    await api.patch(`/documents/${editingId}/`, asFormData(editForm, false));
     setEditingId(null);
     setEditForm(emptyForm);
     loadDocuments();

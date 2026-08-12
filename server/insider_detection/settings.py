@@ -92,7 +92,24 @@ DEFAULT_CORS_ORIGINS = ",".join(
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
 ]
+# Local development: allow any localhost Vite origin to call the API.
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_HEADERS = list(
+    {
+        "accept",
+        "accept-encoding",
+        "authorization",
+        "content-type",
+        "dnt",
+        "origin",
+        "user-agent",
+        "x-csrftoken",
+        "x-requested-with",
+    }
+)
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
