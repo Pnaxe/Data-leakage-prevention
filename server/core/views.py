@@ -1,4 +1,4 @@
-from django.db.models import Count, Q
+from django.db.models import Count
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import decorators, filters, parsers, permissions, viewsets
@@ -246,18 +246,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        role = getattr(getattr(self.request.user, "role", None), "name", None)
-        if role == "normal_user":
-            qs = qs.filter(status=Document.ACTIVE).filter(
-                Q(allowed_roles=self.request.user.role) | Q(allowed_roles__isnull=True)
-            )
         category = self.request.query_params.get("category")
         status = self.request.query_params.get("status")
         if category:
             qs = qs.filter(category_id=category)
         if status:
             qs = qs.filter(status=status)
-        return qs.distinct()
+        return qs
 
     def perform_create(self, serializer):
         document = serializer.save(uploaded_by=self.request.user)
