@@ -1,4 +1,4 @@
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import decorators, filters, parsers, permissions, viewsets
@@ -44,6 +44,34 @@ from .serializers import (
     SensitiveFileSerializer,
     UserSerializer,
 )
+
+
+DOCUMENT_ACTIVITY_TO_LOG_ACTION = {
+    DocumentActivity.UPLOAD: ActivityLog.UPLOAD,
+    DocumentActivity.VIEW: ActivityLog.ACCESS,
+    DocumentActivity.DOWNLOAD: ActivityLog.DOWNLOAD,
+    DocumentActivity.EDIT: ActivityLog.MODIFY,
+    DocumentActivity.ARCHIVE: ActivityLog.MODIFY,
+    DocumentActivity.DELETE: ActivityLog.MODIFY,
+}
+
+
+def record_document_activity(*, document, user, action, details):
+    DocumentActivity.objects.create(
+        document=document,
+        user=user,
+        action=action,
+        details=details,
+    )
+    log_action = DOCUMENT_ACTIVITY_TO_LOG_ACTION.get(action)
+    if not log_action:
+        return
+    activity = ActivityLog.objects.create(
+        user=user,
+        action=log_action,
+        details=f"{details} Document: {document.title}.",
+    )
+    evaluate_activity(activity)
 
 
 class LoginView(TokenObtainPairView):
@@ -220,7 +248,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         role = getattr(getattr(self.request.user, "role", None), "name", None)
         if role == "normal_user":
-            qs = qs.filter(status=Document.ACTIVE).filter(allowed_roles=self.request.user.role)
+            qs = qs.filter(status=Document.ACTIVE).filter(
+                Q(allowed_roles=self.request.user.role) | Q(allowed_roles__isnull=True)
+            )
         category = self.request.query_params.get("category")
         status = self.request.query_params.get("status")
         if category:
@@ -231,7 +261,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         document = serializer.save(uploaded_by=self.request.user)
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=document,
             user=self.request.user,
             action=DocumentActivity.UPLOAD,
@@ -240,7 +270,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         document = self.get_object()
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=document,
             user=request.user,
             action=DocumentActivity.VIEW,
@@ -251,7 +281,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         document = serializer.save()
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=document,
             user=self.request.user,
             action=DocumentActivity.EDIT,
@@ -259,7 +289,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=instance,
             user=self.request.user,
             action=DocumentActivity.DELETE,
@@ -273,7 +303,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document.status = Document.ARCHIVED
         document.archived_at = timezone.now()
         document.save(update_fields=["status", "archived_at", "updated_at"])
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=document,
             user=request.user,
             action=DocumentActivity.ARCHIVE,
@@ -284,7 +314,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @decorators.action(detail=True, methods=["get"])
     def download(self, request, pk=None):
         document = self.get_object()
-        DocumentActivity.objects.create(
+        record_document_activity(
             document=document,
             user=request.user,
             action=DocumentActivity.DOWNLOAD,

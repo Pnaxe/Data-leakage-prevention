@@ -1,8 +1,9 @@
 from django.contrib.auth import get_user_model
+from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand
 
 from core.detection import ensure_default_rules
-from core.models import ActivityLog, DocumentCategory, Role, SensitiveFile
+from core.models import ActivityLog, Document, DocumentCategory, Role, SensitiveFile
 from core.permissions_catalog import ensure_permissions_and_role_defaults
 
 
@@ -63,6 +64,31 @@ class Command(BaseCommand):
             "Confidential Reports",
         ]:
             DocumentCategory.objects.get_or_create(name=category)
+        finance_category = DocumentCategory.objects.get(name="Finance Reports")
+        hr_category = DocumentCategory.objects.get(name="HR Documents")
+
+        self._ensure_document(
+            title="Employee Handbook",
+            category=hr_category,
+            uploaded_by=admin,
+            description="Shared handbook available to all signed-in users.",
+            sensitivity=SensitiveFile.LOW,
+            version="v1.0",
+            allowed_roles=[],
+            file_name="employee-handbook.txt",
+            file_content="Company handbook and onboarding notes.",
+        )
+        self._ensure_document(
+            title="Quarterly Finance Summary",
+            category=finance_category,
+            uploaded_by=officer,
+            description="Finance summary for security and finance staff.",
+            sensitivity=SensitiveFile.MEDIUM,
+            version="v2.1",
+            allowed_roles=[roles[Role.SECURITY_OFFICER], roles[Role.NORMAL_USER]],
+            file_name="quarterly-finance-summary.txt",
+            file_content="Quarterly finance summary for demo access tests.",
+        )
 
         ActivityLog.objects.get_or_create(
             user=user,
@@ -72,3 +98,38 @@ class Command(BaseCommand):
         )
 
         self.stdout.write(self.style.SUCCESS("Demo data created. Logins: admin/admin12345, officer/officer12345, user/user12345"))
+
+    def _ensure_document(
+        self,
+        *,
+        title,
+        category,
+        uploaded_by,
+        description,
+        sensitivity,
+        version,
+        allowed_roles,
+        file_name,
+        file_content,
+    ):
+        document, created = Document.objects.get_or_create(
+            title=title,
+            defaults={
+                "category": category,
+                "uploaded_by": uploaded_by,
+                "description": description,
+                "sensitivity": sensitivity,
+                "version": version,
+            },
+        )
+        if created or not document.file:
+            document.file.save(file_name, ContentFile(file_content), save=False)
+        document.category = category
+        document.uploaded_by = uploaded_by
+        document.description = description
+        document.sensitivity = sensitivity
+        document.version = version
+        document.status = Document.ACTIVE
+        document.archived_at = None
+        document.save()
+        document.allowed_roles.set(allowed_roles)
