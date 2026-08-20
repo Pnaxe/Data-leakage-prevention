@@ -8,6 +8,7 @@ from .models import (
     Alert,
     DetectionRule,
     Document,
+    DocumentAccessRequest,
     DocumentActivity,
     DocumentCategory,
     IncidentReport,
@@ -156,6 +157,8 @@ class UserSerializer(serializers.ModelSerializer):
 
 class SensitiveFileSerializer(serializers.ModelSerializer):
     allowed_role_names = serializers.SerializerMethodField()
+    document_title = serializers.CharField(source="document.title", read_only=True, allow_null=True)
+    source = serializers.SerializerMethodField()
 
     class Meta:
         model = SensitiveFile
@@ -163,6 +166,9 @@ class SensitiveFileSerializer(serializers.ModelSerializer):
 
     def get_allowed_role_names(self, obj):
         return [role.display_name for role in obj.allowed_roles.all()]
+
+    def get_source(self, obj):
+        return "document_repository" if obj.document_id else "manual"
 
 
 class ActivityLogSerializer(serializers.ModelSerializer):
@@ -219,11 +225,17 @@ class DocumentSerializer(serializers.ModelSerializer):
     allowed_role_names = serializers.SerializerMethodField()
     file_name = serializers.SerializerMethodField()
     file_url = serializers.SerializerMethodField()
+    requires_reauth = serializers.SerializerMethodField()
+    download_approval_status = serializers.SerializerMethodField()
+    sensitive_file_id = serializers.IntegerField(source="sensitive_file.id", read_only=True, allow_null=True)
 
     class Meta:
         model = Document
         fields = "__all__"
         read_only_fields = ["uploaded_by", "status", "archived_at"]
+        extra_kwargs = {
+            "file": {"write_only": True, "required": False},
+        }
 
     def get_allowed_role_names(self, obj):
         return [role.display_name for role in obj.allowed_roles.all()]
@@ -232,11 +244,35 @@ class DocumentSerializer(serializers.ModelSerializer):
         return obj.file.name.split("/")[-1] if obj.file else ""
 
     def get_file_url(self, obj):
+        # Never expose direct media URLs for restricted/critical docs.
+        return ""
+
+    def get_requires_reauth(self, obj):
+        return obj.sensitivity == SensitiveFile.CRITICAL
+
+    def get_download_approval_status(self, obj):
         request = self.context.get("request")
-        if not obj.file:
-            return ""
-        url = obj.file.url
-        return request.build_absolute_uri(url) if request else url
+        if not request or not request.user.is_authenticated:
+            return None
+        if not (obj.requires_approval and obj.sensitivity == SensitiveFile.CRITICAL):
+            return "not_required"
+        latest = (
+            obj.access_requests.filter(user=request.user, action="download")
+            .order_by("-created_at")
+            .first()
+        )
+        return latest.status if latest else "none"
+
+
+class DocumentAccessRequestSerializer(serializers.ModelSerializer):
+    document_title = serializers.CharField(source="document.title", read_only=True)
+    username = serializers.CharField(source="user.username", read_only=True)
+    reviewed_by_username = serializers.CharField(source="reviewed_by.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = DocumentAccessRequest
+        fields = "__all__"
+        read_only_fields = ["user", "status", "reviewed_by", "reviewed_at"]
 
 
 class DocumentActivitySerializer(serializers.ModelSerializer):

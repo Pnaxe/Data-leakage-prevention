@@ -61,7 +61,7 @@ class SensitiveFile(models.Model):
     SENSITIVITY_CHOICES = (
         (LOW, "Low"),
         (MEDIUM, "Medium"),
-        (HIGH, "High"),
+        (HIGH, "Confidential"),
         (CRITICAL, "Critical"),
     )
 
@@ -71,6 +71,13 @@ class SensitiveFile(models.Model):
     allowed_roles = models.ManyToManyField(Role, blank=True)
     sensitivity = models.CharField(max_length=20, choices=SENSITIVITY_CHOICES, default=MEDIUM)
     requires_approval = models.BooleanField(default=False)
+    document = models.OneToOneField(
+        "Document",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sensitive_file",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -198,6 +205,10 @@ class Document(models.Model):
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="uploaded_documents")
     allowed_roles = models.ManyToManyField(Role, blank=True)
     sensitivity = models.CharField(max_length=20, choices=SensitiveFile.SENSITIVITY_CHOICES, default=SensitiveFile.MEDIUM)
+    requires_approval = models.BooleanField(
+        default=False,
+        help_text="When enabled for critical documents, downloads need admin approval.",
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=ACTIVE)
     version = models.CharField(max_length=40, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -209,6 +220,41 @@ class Document(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class DocumentAccessRequest(models.Model):
+    VIEW = "view"
+    DOWNLOAD = "download"
+    ACTION_CHOICES = (
+        (VIEW, "View"),
+        (DOWNLOAD, "Download"),
+    )
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    STATUS_CHOICES = (
+        (PENDING, "Pending"),
+        (APPROVED, "Approved"),
+        (DENIED, "Denied"),
+    )
+
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="access_requests")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="document_access_requests")
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES, default=DOWNLOAD)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+    note = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_document_access_requests",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class DocumentActivity(models.Model):

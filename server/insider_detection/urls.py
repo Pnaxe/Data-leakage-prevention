@@ -10,6 +10,7 @@ from core.views import (
     ActivityLogViewSet,
     AlertViewSet,
     DetectionRuleViewSet,
+    DocumentAccessRequestViewSet,
     DocumentActivityViewSet,
     DocumentCategoryViewSet,
     DocumentViewSet,
@@ -33,6 +34,7 @@ router.register("reports", IncidentReportViewSet)
 router.register("document-categories", DocumentCategoryViewSet)
 router.register("documents", DocumentViewSet)
 router.register("document-activity", DocumentActivityViewSet)
+router.register("document-access-requests", DocumentAccessRequestViewSet)
 
 urlpatterns = [
     path("admin/", admin.site.urls),

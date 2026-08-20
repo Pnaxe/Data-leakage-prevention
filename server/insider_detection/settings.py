@@ -108,6 +108,7 @@ CORS_ALLOW_HEADERS = list(
         "user-agent",
         "x-csrftoken",
         "x-requested-with",
+        "x-document-reauth",
     }
 )
 
@@ -125,3 +126,17 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": False,
 }
+
+# Email notifications (unauthorized access alerts). Console backend is used in DEBUG.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.console.EmailBackend" if DEBUG else "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "dlp-alerts@localhost")
+ADMIN_ALERT_EMAIL = os.getenv("ADMIN_ALERT_EMAIL", "admin@example.com")
+

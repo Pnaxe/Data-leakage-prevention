@@ -1,18 +1,31 @@
 from django.db.models import Count
 from django.http import FileResponse
 from django.utils import timezone
-from rest_framework import decorators, filters, parsers, permissions, viewsets
+from rest_framework import decorators, filters, parsers, permissions, status, viewsets
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .detection import evaluate_activity
+from .document_access import (
+    document_requires_download_approval,
+    document_requires_reauth,
+    documents_queryset_for_user,
+    has_approved_download,
+    issue_reauth_token,
+    record_unauthorized_access,
+    sync_sensitive_file_from_document,
+    user_can_access_document,
+    verify_reauth_token,
+)
 from .models import (
     AccessPermission,
     ActivityLog,
     Alert,
     DetectionRule,
     Document,
+    DocumentAccessRequest,
     DocumentActivity,
     DocumentCategory,
     IncidentReport,
@@ -28,6 +41,7 @@ from .permissions import (
     IsAdminOrSecurityOfficer,
     can_view_all_users,
     get_user_role_name,
+    is_privileged_user,
     scope_alerts_queryset,
 )
 from .serializers import (
@@ -35,6 +49,7 @@ from .serializers import (
     ActivityLogSerializer,
     AlertSerializer,
     DetectionRuleSerializer,
+    DocumentAccessRequestSerializer,
     DocumentActivitySerializer,
     DocumentCategorySerializer,
     DocumentSerializer,
@@ -66,8 +81,10 @@ def record_document_activity(*, document, user, action, details):
     log_action = DOCUMENT_ACTIVITY_TO_LOG_ACTION.get(action)
     if not log_action:
         return
+    sensitive = getattr(document, "sensitive_file", None)
     activity = ActivityLog.objects.create(
         user=user,
+        file=sensitive,
         action=log_action,
         details=f"{details} Document: {document.title}.",
     )
@@ -99,7 +116,11 @@ class AccessPermissionViewSet(viewsets.ReadOnlyModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [IsAdmin]
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [permissions.IsAuthenticated()]
+        return [IsAdmin()]
 
     def get_queryset(self):
         return Role.objects.prefetch_related("permissions").annotate(user_count=Count("user"))
@@ -135,11 +156,11 @@ class UserViewSet(viewsets.ModelViewSet):
 
 
 class SensitiveFileViewSet(viewsets.ModelViewSet):
-    queryset = SensitiveFile.objects.prefetch_related("allowed_roles").all()
+    queryset = SensitiveFile.objects.select_related("document").prefetch_related("allowed_roles").all()
     serializer_class = SensitiveFileSerializer
     permission_classes = [IsAdminOrSecurityOfficer]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ["name", "path", "owner_department", "sensitivity"]
+    search_fields = ["name", "path", "owner_department", "sensitivity", "document__title"]
     ordering_fields = ["created_at", "sensitivity", "name"]
 
 
@@ -236,7 +257,9 @@ class DocumentCategoryViewSet(viewsets.ModelViewSet):
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
-    queryset = Document.objects.select_related("category", "uploaded_by").prefetch_related("allowed_roles").all()
+    queryset = Document.objects.select_related(
+        "category", "uploaded_by", "sensitive_file"
+    ).prefetch_related("allowed_roles").all()
     serializer_class = DocumentSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
@@ -245,17 +268,80 @@ class DocumentViewSet(viewsets.ModelViewSet):
     ordering_fields = ["created_at", "updated_at", "title", "sensitivity"]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = documents_queryset_for_user(self.request.user, super().get_queryset())
         category = self.request.query_params.get("category")
-        status = self.request.query_params.get("status")
+        status_value = self.request.query_params.get("status")
         if category:
             qs = qs.filter(category_id=category)
-        if status:
-            qs = qs.filter(status=status)
+        if status_value:
+            qs = qs.filter(status=status_value)
         return qs
+
+    def _load_document(self, pk):
+        return Document.objects.select_related(
+            "category", "uploaded_by", "sensitive_file"
+        ).prefetch_related("allowed_roles").filter(pk=pk).first()
+
+    def _deny_unauthorized(self, request, document, action):
+        record_unauthorized_access(
+            user=request.user,
+            document=document,
+            action=action,
+            details=(
+                f"Unauthorized {action} attempt on document \"{document.title}\" "
+                f"by {request.user.username}."
+            ),
+        )
+        return Response(
+            {
+                "detail": "You are not authorized to access this document.",
+                "code": "unauthorized_document",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    def _ensure_reauth(self, request, document):
+        if not document_requires_reauth(document):
+            return None
+        token = request.headers.get("X-Document-Reauth") or request.query_params.get("reauth_token")
+        if verify_reauth_token(request.user, document, token):
+            return None
+        return Response(
+            {
+                "detail": "Critical documents require password re-authentication.",
+                "code": "reauth_required",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    def _ensure_download_approval(self, request, document):
+        if not document_requires_download_approval(document):
+            return None
+        if is_privileged_user(request.user):
+            return None
+        if has_approved_download(request.user, document):
+            return None
+        pending = DocumentAccessRequest.objects.filter(
+            document=document,
+            user=request.user,
+            action=DocumentAccessRequest.DOWNLOAD,
+            status=DocumentAccessRequest.PENDING,
+        ).exists()
+        return Response(
+            {
+                "detail": "Critical download requires admin approval.",
+                "code": "approval_required",
+                "pending": pending,
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     def perform_create(self, serializer):
         document = serializer.save(uploaded_by=self.request.user)
+        if document.sensitivity == SensitiveFile.CRITICAL and "requires_approval" not in serializer.validated_data:
+            document.requires_approval = True
+            document.save(update_fields=["requires_approval"])
+        sync_sensitive_file_from_document(document)
         record_document_activity(
             document=document,
             user=self.request.user,
@@ -264,7 +350,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
 
     def retrieve(self, request, *args, **kwargs):
-        document = self.get_object()
+        document = self._load_document(kwargs.get("pk"))
+        if not document:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not user_can_access_document(request.user, document):
+            return self._deny_unauthorized(request, document, "view")
+        reauth_error = self._ensure_reauth(request, document)
+        if reauth_error:
+            return reauth_error
         record_document_activity(
             document=document,
             user=request.user,
@@ -276,6 +369,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         document = serializer.save()
+        sync_sensitive_file_from_document(document)
         record_document_activity(
             document=document,
             user=self.request.user,
@@ -284,6 +378,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
+        if not is_privileged_user(self.request.user) and instance.uploaded_by_id != self.request.user.id:
+            raise PermissionDenied("Only admins or the uploader can delete this document.")
         record_document_activity(
             document=instance,
             user=self.request.user,
@@ -294,7 +390,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @decorators.action(detail=True, methods=["post"])
     def archive(self, request, pk=None):
-        document = self.get_object()
+        document = self._load_document(pk)
+        if not document:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not is_privileged_user(request.user) and document.uploaded_by_id != request.user.id:
+            return self._deny_unauthorized(request, document, "archive")
         document.status = Document.ARCHIVED
         document.archived_at = timezone.now()
         document.save(update_fields=["status", "archived_at", "updated_at"])
@@ -308,14 +408,115 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @decorators.action(detail=True, methods=["get"])
     def download(self, request, pk=None):
-        document = self.get_object()
+        document = self._load_document(pk)
+        if not document:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not user_can_access_document(request.user, document):
+            return self._deny_unauthorized(request, document, "download")
+        approval_error = self._ensure_download_approval(request, document)
+        if approval_error:
+            return approval_error
+        reauth_error = self._ensure_reauth(request, document)
+        if reauth_error:
+            return reauth_error
+        if not document.file:
+            return Response({"detail": "No file attached."}, status=status.HTTP_404_NOT_FOUND)
         record_document_activity(
             document=document,
             user=request.user,
             action=DocumentActivity.DOWNLOAD,
             details="Document downloaded.",
         )
-        return FileResponse(document.file.open("rb"), as_attachment=True, filename=document.file.name.split("/")[-1])
+        return FileResponse(
+            document.file.open("rb"),
+            as_attachment=True,
+            filename=document.file.name.split("/")[-1],
+        )
+
+    @decorators.action(detail=True, methods=["post"], url_path="reauthenticate")
+    def reauthenticate(self, request, pk=None):
+        document = self._load_document(pk)
+        if not document:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not user_can_access_document(request.user, document):
+            return self._deny_unauthorized(request, document, "reauthenticate")
+        password = request.data.get("password", "")
+        if not request.user.check_password(password):
+            return Response(
+                {"detail": "Incorrect password.", "code": "invalid_password"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        token = issue_reauth_token(request.user, document)
+        return Response({"reauth_token": token, "expires_in": 300})
+
+    @decorators.action(detail=True, methods=["post"], url_path="request-download-approval")
+    def request_download_approval(self, request, pk=None):
+        document = self._load_document(pk)
+        if not document:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not user_can_access_document(request.user, document):
+            return self._deny_unauthorized(request, document, "request_approval")
+        if not document_requires_download_approval(document):
+            return Response({"detail": "Approval is not required for this document."}, status=400)
+        existing = DocumentAccessRequest.objects.filter(
+            document=document,
+            user=request.user,
+            action=DocumentAccessRequest.DOWNLOAD,
+            status__in=[DocumentAccessRequest.PENDING, DocumentAccessRequest.APPROVED],
+        ).first()
+        if existing:
+            return Response(DocumentAccessRequestSerializer(existing).data)
+        access_request = DocumentAccessRequest.objects.create(
+            document=document,
+            user=request.user,
+            action=DocumentAccessRequest.DOWNLOAD,
+            note=request.data.get("note", ""),
+        )
+        return Response(DocumentAccessRequestSerializer(access_request).data, status=status.HTTP_201_CREATED)
+
+
+class DocumentAccessRequestViewSet(viewsets.ModelViewSet):
+    queryset = DocumentAccessRequest.objects.select_related(
+        "document", "user", "reviewed_by"
+    ).all()
+    serializer_class = DocumentAccessRequestSerializer
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["document__title", "user__username", "status", "note"]
+    ordering_fields = ["created_at", "status"]
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve", "create"):
+            return [permissions.IsAuthenticated()]
+        return [IsAdminOrSecurityOfficer()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if is_privileged_user(self.request.user):
+            return qs
+        return qs.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user, action=DocumentAccessRequest.DOWNLOAD)
+
+    @decorators.action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        access_request = self.get_object()
+        access_request.status = DocumentAccessRequest.APPROVED
+        access_request.reviewed_by = request.user
+        access_request.reviewed_at = timezone.now()
+        access_request.note = request.data.get("note", access_request.note)
+        access_request.save()
+        return Response(self.get_serializer(access_request).data)
+
+    @decorators.action(detail=True, methods=["post"])
+    def deny(self, request, pk=None):
+        access_request = self.get_object()
+        access_request.status = DocumentAccessRequest.DENIED
+        access_request.reviewed_by = request.user
+        access_request.reviewed_at = timezone.now()
+        access_request.note = request.data.get("note", access_request.note)
+        access_request.save()
+        return Response(self.get_serializer(access_request).data)
 
 
 class DocumentActivityViewSet(viewsets.ReadOnlyModelViewSet):
@@ -328,6 +529,8 @@ class DocumentActivityViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        if not is_privileged_user(self.request.user):
+            qs = qs.filter(user=self.request.user)
         document = self.request.query_params.get("document")
         if document:
             qs = qs.filter(document_id=document)

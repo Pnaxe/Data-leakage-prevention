@@ -71,10 +71,11 @@ class Command(BaseCommand):
             title="Employee Handbook",
             category=hr_category,
             uploaded_by=admin,
-            description="Shared handbook available to all signed-in users.",
+            description="Shared handbook for staff with authorized access.",
             sensitivity=SensitiveFile.LOW,
             version="v1.0",
-            allowed_roles=[],
+            allowed_roles=[roles[Role.ADMIN], roles[Role.SECURITY_OFFICER], roles[Role.NORMAL_USER]],
+            requires_approval=False,
             file_name="employee-handbook.txt",
             file_content="Company handbook and onboarding notes.",
         )
@@ -83,12 +84,30 @@ class Command(BaseCommand):
             category=finance_category,
             uploaded_by=officer,
             description="Finance summary for security and finance staff.",
-            sensitivity=SensitiveFile.MEDIUM,
+            sensitivity=SensitiveFile.HIGH,
             version="v2.1",
             allowed_roles=[roles[Role.SECURITY_OFFICER], roles[Role.NORMAL_USER]],
+            requires_approval=False,
             file_name="quarterly-finance-summary.txt",
             file_content="Quarterly finance summary for demo access tests.",
         )
+        self._ensure_document(
+            title="Executive Payroll Master",
+            category=DocumentCategory.objects.get(name="Payroll Files"),
+            uploaded_by=admin,
+            description="Admin-only critical payroll extract. Requires re-auth and approval to download.",
+            sensitivity=SensitiveFile.CRITICAL,
+            version="v1.0",
+            allowed_roles=[roles[Role.ADMIN]],
+            requires_approval=True,
+            file_name="executive-payroll-master.txt",
+            file_content="Confidential payroll extract for admin review only.",
+        )
+
+        from core.document_access import sync_sensitive_file_from_document
+
+        for document in Document.objects.filter(sensitivity__in=[SensitiveFile.HIGH, SensitiveFile.CRITICAL]):
+            sync_sensitive_file_from_document(document)
 
         ActivityLog.objects.get_or_create(
             user=user,
@@ -111,6 +130,7 @@ class Command(BaseCommand):
         allowed_roles,
         file_name,
         file_content,
+        requires_approval=False,
     ):
         document, created = Document.objects.get_or_create(
             title=title,
@@ -120,6 +140,7 @@ class Command(BaseCommand):
                 "description": description,
                 "sensitivity": sensitivity,
                 "version": version,
+                "requires_approval": requires_approval,
             },
         )
         if created or not document.file:
@@ -129,6 +150,7 @@ class Command(BaseCommand):
         document.description = description
         document.sensitivity = sensitivity
         document.version = version
+        document.requires_approval = requires_approval
         document.status = Document.ACTIVE
         document.archived_at = None
         document.save()

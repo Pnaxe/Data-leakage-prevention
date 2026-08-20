@@ -13,6 +13,13 @@ const SENSITIVITY_TONES = {
   critical: "bg-rose-100 text-rose-800"
 };
 
+const SENSITIVITY_LABELS = {
+  low: "Low",
+  medium: "Medium",
+  high: "Confidential",
+  critical: "Critical"
+};
+
 const emptyForm = {
   name: "",
   path: "",
@@ -49,6 +56,7 @@ export default function SensitiveFiles() {
   const [editForm, setEditForm] = useState(emptyForm);
   const [toast, setToast] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [accessRequests, setAccessRequests] = useState([]);
 
   function loadFiles() {
     return api.get("/sensitive-files/")
@@ -56,8 +64,15 @@ export default function SensitiveFiles() {
       .catch(() => setFiles([]));
   }
 
+  function loadAccessRequests() {
+    return api.get("/document-access-requests/")
+      .then((response) => setAccessRequests(response.data.results || response.data))
+      .catch(() => setAccessRequests([]));
+  }
+
   useEffect(() => {
     loadFiles();
+    loadAccessRequests();
     api.get("/roles/")
       .then((response) => setRoles(response.data.results || response.data))
       .catch(() => setRoles([]));
@@ -165,7 +180,7 @@ export default function SensitiveFiles() {
           >
             <option value="low">Low</option>
             <option value="medium">Medium</option>
-            <option value="high">High</option>
+            <option value="high">Confidential</option>
             <option value="critical">Critical</option>
           </select>
         </Field>
@@ -244,12 +259,26 @@ export default function SensitiveFiles() {
     }
   }
 
+  async function reviewRequest(request, decision) {
+    try {
+      await api.post(`/document-access-requests/${request.id}/${decision}/`);
+      await loadAccessRequests();
+      showToast(`Request ${decision}d successfully.`, "success");
+    } catch (error) {
+      showToast(apiErrorMessage(error, `Failed to ${decision} request.`), "error");
+    }
+  }
+
+  const pendingRequests = accessRequests.filter((item) => item.status === "pending");
+
   return (
     <div className="page-fill">
       <div className="flex shrink-0 items-end justify-between gap-4">
         <div>
           <h2 className="page-title">Sensitive Files</h2>
-          <p className="muted">Classify high-value files and define role-based access controls.</p>
+          <p className="muted">
+            Monitoring register for confidential/critical Document Repository uploads (plus optional legacy path entries).
+          </p>
         </div>
         <button
           type="button"
@@ -257,7 +286,7 @@ export default function SensitiveFiles() {
           className="inline-flex shrink-0 items-center gap-2 rounded-sm border border-[#7c4dff] bg-[#7c4dff] px-3 py-2 text-sm font-bold text-white hover:bg-[#6b3fe8]"
         >
           <Plus size={16} />
-          Register file
+          Register legacy path
         </button>
       </div>
 
@@ -284,7 +313,7 @@ export default function SensitiveFiles() {
             <option value="">All levels</option>
             <option value="low">Low</option>
             <option value="medium">Medium</option>
-            <option value="high">High</option>
+            <option value="high">Confidential</option>
             <option value="critical">Critical</option>
           </select>
         </label>
@@ -311,10 +340,43 @@ export default function SensitiveFiles() {
 
       <Toast open={Boolean(toast)} message={toast?.message} type={toast?.type} onClose={dismissToast} />
 
+      {pendingRequests.length > 0 && (
+        <section className="panel shrink-0 p-4">
+          <h3 className="mb-3 text-sm font-extrabold text-slate-900">Pending critical download approvals</h3>
+          <div className="space-y-2">
+            {pendingRequests.map((request) => (
+              <div key={request.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-200 bg-white px-3 py-2">
+                <div className="text-sm">
+                  <span className="font-bold text-slate-800">{request.username}</span>
+                  {" requested download of "}
+                  <span className="font-bold text-slate-800">{request.document_title}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => reviewRequest(request, "approve")}
+                    className="rounded-sm bg-[#7c4dff] px-3 py-1.5 text-xs font-extrabold text-white hover:bg-[#6d28d9]"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => reviewRequest(request, "deny")}
+                    className="rounded-sm border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    Deny
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       <Modal
         open={showCreateForm}
         onClose={closeCreateModal}
-        title="Register Sensitive File"
+        title="Register Legacy Sensitive Path"
         maxWidth="max-w-3xl"
         footer={(
           <>
@@ -382,6 +444,20 @@ export default function SensitiveFiles() {
           fill
           columns={[
             { key: "name", label: "Name" },
+            {
+              key: "source",
+              label: "Source",
+              render: (row) => (
+                <span className="text-xs font-bold uppercase tracking-wide text-slate-600">
+                  {row.source === "document_repository" ? "Document Repo" : "Legacy path"}
+                </span>
+              )
+            },
+            {
+              key: "document_title",
+              label: "Linked document",
+              render: (row) => row.document_title || "—"
+            },
             { key: "path", label: "Path", render: (row) => (
               <span className="block max-w-[200px] truncate font-semibold text-slate-700" title={row.path}>
                 {row.path}
@@ -393,8 +469,8 @@ export default function SensitiveFiles() {
               label: "Sensitivity",
               align: "right",
               render: (row) => (
-                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold capitalize ${SENSITIVITY_TONES[row.sensitivity] || SENSITIVITY_TONES.medium}`}>
-                  {row.sensitivity || "medium"}
+                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${SENSITIVITY_TONES[row.sensitivity] || SENSITIVITY_TONES.medium}`}>
+                  {SENSITIVITY_LABELS[row.sensitivity] || row.sensitivity || "Medium"}
                 </span>
               )
             },
@@ -417,7 +493,9 @@ export default function SensitiveFiles() {
               label: "Actions",
               render: (row) => (
                 <div className="pm-row-actions">
-                  <button type="button" title="Edit" onClick={() => startEdit(row)}><Pencil size={14} /></button>
+                  {row.source !== "document_repository" && (
+                    <button type="button" title="Edit" onClick={() => startEdit(row)}><Pencil size={14} /></button>
+                  )}
                   <button type="button" title="Delete" onClick={() => deleteFile(row)}><Trash2 size={14} /></button>
                 </div>
               )
